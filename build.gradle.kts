@@ -28,6 +28,7 @@ dependencies {
     implementation(libs.ktor.client.content.negotiation)
     implementation(libs.ktor.serialization.kotlinx.json)
     implementation("io.modelcontextprotocol:kotlin-sdk:0.7.7")
+    implementation("io.ktor:ktor-server-call-logging:3.2.3")
 
     implementation("io.ktor:ktor-client-java:3.2.3")
 

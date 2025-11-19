@@ -43,3 +43,7 @@ bin/
 
 ### Mac OS ###
 .DS_Store
+
+### Sensitive data ###
+Keys.kt
+**/Keys.kt
