@@ -15,6 +15,9 @@ import kotlin.collections.map
 import kotlin.text.contains
 import kotlin.text.lowercase
 import kotlin.text.substringAfterLast
+import java.io.File
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 
 
 class MCPClient : AutoCloseable {
@@ -69,7 +72,7 @@ class MCPClient : AutoCloseable {
     suspend fun getMessagesAndCreateSummary(
         yandexGPTClient: YandexGPTClient,
         chatId: Long = USER_ID
-    ) {
+    ): String? {
         this.yandexGPTClient = yandexGPTClient
         
         // Шаг 1: Создаем схему функции get_messages для YandexGPT
@@ -79,7 +82,7 @@ class MCPClient : AutoCloseable {
         // Шаг 2: Создаем промпт для YandexGPT
         val userMessage = YandexGPTMessage(
             role = "user",
-            text = "Вызови функцию get_messages для получения сообщений из диалога с chat_id=$chatId, " +
+            text = "Давай возьмем последние несколько сообщений из диалога с chat_id=$chatId, " +
                     "а затем сделай из них summary, с рассказом о том, что обсуждалось в диалоге, сохранив ключевые темы, вопросы, решения и важные детали. Учти, диалог приходит в порядке убывания," +
                     " тебе нужно отсортировать его по хронологии. Ориентируйся на \"Date\""
         )
@@ -115,7 +118,7 @@ class MCPClient : AutoCloseable {
                 // Шаг 5: Вызываем реальную функцию через MCP
                 val chatIdParam = argumentsJson["chat_id"]?.jsonPrimitive?.long ?: chatId
                 val page = argumentsJson["page"]?.jsonPrimitive?.int ?: 1
-                val pageSize = argumentsJson["page_size"]?.jsonPrimitive?.int ?: 5
+                val pageSize = argumentsJson["page_size"]?.jsonPrimitive?.int ?: 8
                 
                 println("[MCP] Вызываю get_messages с параметрами: chat_id=$chatIdParam, page=$page, page_size=$pageSize")
                 
@@ -172,10 +175,11 @@ class MCPClient : AutoCloseable {
                 val finalAlternative = finalResponse.result.alternatives.firstOrNull()
                 val finalText = finalAlternative?.message?.text
                 
-                if (finalText != null) {
+                val summaryText = if (finalText != null) {
                     println("\n=== РЕЗЮМЕ ДИАЛОГА ===")
                     println(finalText)
                     println("=====================\n")
+                    finalText
                 } else {
                     // Если финальный ответ не получен, создаем саммари напрямую через generateSummary
                     println("Не удалось получить саммари через function calling, создаю напрямую...")
@@ -184,16 +188,54 @@ class MCPClient : AutoCloseable {
                     println("\n=== РЕЗЮМЕ ДИАЛОГА ===")
                     println(summary)
                     println("=====================\n")
+                    summary
                 }
-            }
+                
+                // Сохраняем суммари в файл
+                saveSummaryToFile(summaryText)
+                return summaryText
+            } else return null
         } else {
             // YandexGPT не вызвал функцию, возможно вернул текст
             val text = alternative?.message?.text
-            if (text != null) {
+            return if (text != null) {
                 println("YandexGPT ответил: $text")
+                saveSummaryToFile(text)
+                text
             } else {
                 println("Не удалось получить ответ от YandexGPT. Статус: ${alternative?.status}")
+                null
             }
+        }
+    }
+    
+    private fun saveSummaryToFile(summary: String) {
+        try {
+            val resourcesDir = File("resources")
+            if (!resourcesDir.exists()) {
+                resourcesDir.mkdirs()
+                println("[FILE] Создана директория: ${resourcesDir.absolutePath}")
+            }
+            
+            val dateTime = LocalDateTime.now()
+            val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss")
+            val dateTimeFormatted = dateTime.format(formatter)
+            val dateTimeHeader = dateTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+            
+            val fileName = "summary_$dateTimeFormatted.txt"
+            val file = File(resourcesDir, fileName)
+            
+            val content = buildString {
+                appendLine("Summary диалога от: $dateTimeHeader")
+                appendLine()
+                appendLine(summary)
+            }
+            
+            file.writeText(content, Charsets.UTF_8)
+            println("[FILE] Суммари сохранено в файл: ${file.absolutePath}")
+        } catch (e: Exception) {
+            println("[FILE] Ошибка при сохранении суммари в файл: ${e.message}")
+            e.printStackTrace()
         }
     }
     
@@ -250,8 +292,8 @@ class MCPClient : AutoCloseable {
                 }
                 putJsonObject("page_size") {
                     put("type", "integer")
-                    put("description", "Размер страницы (по умолчанию 5)")
-                    put("default", 5)
+                    put("description", "Размер страницы (по умолчанию 8)")
+                    put("default", 8)
                 }
             }
             putJsonArray("required") {

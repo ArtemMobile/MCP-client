@@ -47,3 +47,7 @@ bin/
 ### Sensitive data ###
 Keys.kt
 **/Keys.kt
+
+### Summary files ###
+resources/
+!resources/.gitkeep

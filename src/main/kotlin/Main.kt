@@ -1,16 +1,14 @@
 package org.example
 
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlin.time.Duration.Companion.seconds
 
 fun main(vararg args: String): Unit = runBlocking {
-//    require(args.size >= 1) {
-//        "Usage: java -jar build/libs/MCP-client-1.0-SNAPSHOT.jar <path_to_server_script> <yandex_iam_token> <yandex_folder_id>"
     require(args.isNotEmpty()) {
         "Usage: java -jar libs/MCP-client-1.0-SNAPSHOT.jar <path_to_server_script>"
     }
     val serverPath = args[0]
-//    val yandexIamToken = args[1]
-//    val yandexFolderId = args[2]
 
     val yandexGPTClient = YandexGPTClient(
         iamToken = Keys.IAM_TOKEN,
@@ -20,7 +18,27 @@ fun main(vararg args: String): Unit = runBlocking {
     val client = MCPClient()
     client.use {
         client.connectToServer(serverPath) {
-            client.getMessagesAndCreateSummary(yandexGPTClient)
+            // Периодический вызов функции каждую минуту после завершения предыдущего
+            while (true) {
+                try {
+                    println("\n[PERIODIC] Начинаю создание суммари...")
+                    val startTime = System.currentTimeMillis()
+                    
+                    client.getMessagesAndCreateSummary(yandexGPTClient)
+                    
+                    val endTime = System.currentTimeMillis()
+                    val duration = (endTime - startTime) / 1000.0
+                    println("[PERIODIC] Создание суммари завершено за ${duration}с")
+                    
+                    println("[PERIODIC] Ожидание 90 сек до следующего вызова...")
+                    delay(90.seconds)
+                } catch (e: Exception) {
+                    println("[PERIODIC] Ошибка при создании суммари: ${e.message}")
+                    e.printStackTrace()
+                    println("[PERIODIC] Повторная попытка через 90 сек...")
+                    delay(90.seconds)
+                }
+            }
         }
     }
 }
