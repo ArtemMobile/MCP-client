@@ -10,6 +10,7 @@ import kotlinx.io.asSink
 import kotlinx.io.asSource
 import kotlinx.io.buffered
 import kotlinx.serialization.json.*
+import org.example.Keys.USER_ID
 import kotlin.collections.map
 import kotlin.text.contains
 import kotlin.text.lowercase
@@ -53,9 +54,10 @@ class MCPClient : AutoCloseable {
             mcp.connect(transport)
 
             // Request the list of available tools from the server
+            println("[MCP] Запрашиваю список доступных инструментов...")
             val toolsResult = mcp.listTools()
             tools = toolsResult.tools
-            println("Connected to server with tools: ${tools.map { it.name }}")
+            println("[MCP] Подключено к серверу с инструментами: ${tools.map { it.name }}")
             onConnected()
 
         } catch (e: Exception) {
@@ -66,44 +68,56 @@ class MCPClient : AutoCloseable {
 
     suspend fun getMessagesAndCreateSummary(
         yandexGPTClient: YandexGPTClient,
-        chatId: Long = 408840411
+        chatId: Long = USER_ID
     ) {
         this.yandexGPTClient = yandexGPTClient
         
-        // Создаем схему функции get_messages для YandexGPT
+        // Шаг 1: Создаем схему функции get_messages для YandexGPT
+        println("[YandexGPT] Создаю схему функции get_messages...")
         val getMessagesTool = createGetMessagesTool()
-        println("getMessagesTool: $getMessagesTool")
         
-        // Создаем промпт для YandexGPT
+        // Шаг 2: Создаем промпт для YandexGPT
         val userMessage = YandexGPTMessage(
             role = "user",
-            text = "Вызови функцию get_messages для получения сообщений из диалога с chat_id=$chatId"
+            text = "Вызови функцию get_messages для получения сообщений из диалога с chat_id=$chatId, " +
+                    "а затем сделай из них summary, с рассказом о том, что обсуждалось в диалоге, сохранив ключевые темы, вопросы, решения и важные детали. Учти, диалог приходит в порядке убывания," +
+                    " тебе нужно отсортировать его по хронологии. Ориентируйся на \"Date\""
         )
         
-        // Вызываем YandexGPT с функцией
+        // Шаг 3: Вызываем YandexGPT с функцией
+        println("[YandexGPT] Запрашиваю вызов функции get_messages через YandexGPT...")
         val response = yandexGPTClient.callWithTools(
             messages = listOf(userMessage),
             tools = listOf(getMessagesTool)
         )
-        println("RESPONSE: $response")
 
-        // Обрабатываем ответ от YandexGPT
+        // Шаг 4: Обрабатываем ответ от YandexGPT
         val alternative = response.result.alternatives.firstOrNull()
-        val toolCalls = alternative?.message?.toolCalls
+        val toolCallList = alternative?.message?.toolCallList
+        println()
+        println()
+        println("-----------------------------------------------------------------")
+        println()
+        println()
+        println("[YandexGPT] Обрабатываю ответ. Статус: ${alternative?.status}")
         
-        if (toolCalls != null && toolCalls.isNotEmpty()) {
+        if (toolCallList != null && toolCallList.toolCalls.isNotEmpty()) {
             // YandexGPT хочет вызвать функцию
-            val toolCall = toolCalls.first()
-            val functionName = toolCall.function.name
-            val argumentsJson = Json.parseToJsonElement(toolCall.function.arguments).jsonObject
+            println("[YandexGPT] Обнаружен вызов функции в ответе")
+            val toolCall = toolCallList.toolCalls.first()
+            val functionCall = toolCall.functionCall
+            val functionName = functionCall.name
+            val argumentsJson = functionCall.arguments // Это уже JsonObject, не строка!
+            
+            println("[YandexGPT] Функция: $functionName, аргументы: ${Json.encodeToString(argumentsJson)}")
             
             if (functionName == "get_messages") {
-                // Вызываем реальную функцию через MCP
+                // Шаг 5: Вызываем реальную функцию через MCP
                 val chatIdParam = argumentsJson["chat_id"]?.jsonPrimitive?.long ?: chatId
                 val page = argumentsJson["page"]?.jsonPrimitive?.int ?: 1
-                val pageSize = argumentsJson["page_size"]?.jsonPrimitive?.int ?: 20
+                val pageSize = argumentsJson["page_size"]?.jsonPrimitive?.int ?: 5
                 
-                println("Вызываю get_messages через MCP с параметрами: chat_id=$chatIdParam, page=$page, page_size=$pageSize")
+                println("[MCP] Вызываю get_messages с параметрами: chat_id=$chatIdParam, page=$page, page_size=$pageSize")
                 
                 val mcpResult = mcp.callTool(
                     "get_messages",
@@ -113,18 +127,64 @@ class MCPClient : AutoCloseable {
                         "page_size" to pageSize
                     )
                 )
+                println("[MCP] Получен ответ от get_messages")
                 
                 // Получаем текст сообщений из результата
                 val messagesText = extractMessagesText(mcpResult)
                 println("Получены сообщения:\n$messagesText")
+                println()
+                println()
+                println("-----------------------------------------------------------------")
+                println()
+                println()
                 
-                // Создаем саммари через YandexGPT
+                // Шаг 6: Отправляем результат функции обратно в YandexGPT
+                // Создаем сообщение с результатом функции и промптом для создания саммари
+                val summaryPrompt = "Создай подробное резюме диалога, сохранив ключевые темы, вопросы, решения и важные детали.\n\nРезюме должно быть на русском языке, информативным, кратким."
+                
+                val toolResultMessage = YandexGPTMessage(
+                    role = "user",
+//                    text = summaryPrompt,
+                    toolResultList = YandexGPTToolResultList(
+                        toolResults = listOf(
+                            YandexGPTToolResult(
+                                functionResult = YandexGPTFunctionResult(
+                                    name = functionName,
+                                    content = messagesText
+                                )
+                            )
+                        )
+                    )
+                )
+                
+                // Шаг 7: Отправляем обновленный список сообщений для получения финального ответа (саммари)
                 println("\nСоздаю саммари диалога...")
-                val summary = yandexGPTClient.generateSummary(messagesText)
+                val finalResponse = yandexGPTClient.continueWithToolResult(
+                    messages = listOf(userMessage, alternative.message, toolResultMessage)
+                )
+                println()
+                println()
+                println("-----------------------------------------------------------------")
+                println()
+                println()
                 
-                println("\n=== РЕЗЮМЕ ДИАЛОГА ===")
-                println(summary)
-                println("=====================\n")
+                // Шаг 8: Получаем финальный ответ (саммари)
+                val finalAlternative = finalResponse.result.alternatives.firstOrNull()
+                val finalText = finalAlternative?.message?.text
+                
+                if (finalText != null) {
+                    println("\n=== РЕЗЮМЕ ДИАЛОГА ===")
+                    println(finalText)
+                    println("=====================\n")
+                } else {
+                    // Если финальный ответ не получен, создаем саммари напрямую через generateSummary
+                    println("Не удалось получить саммари через function calling, создаю напрямую...")
+                    val summary = yandexGPTClient.generateSummary(messagesText)
+                    
+                    println("\n=== РЕЗЮМЕ ДИАЛОГА ===")
+                    println(summary)
+                    println("=====================\n")
+                }
             }
         } else {
             // YandexGPT не вызвал функцию, возможно вернул текст
@@ -132,7 +192,7 @@ class MCPClient : AutoCloseable {
             if (text != null) {
                 println("YandexGPT ответил: $text")
             } else {
-                println("Не удалось получить ответ от YandexGPT")
+                println("Не удалось получить ответ от YandexGPT. Статус: ${alternative?.status}")
             }
         }
     }
@@ -144,7 +204,7 @@ class MCPClient : AutoCloseable {
         
         // Пытаемся извлечь текст из content
         val contentText = (mcpResult.content.firstOrNull() as? TextContent)?.text
-        println("contentText: $contentText")
+        println("[MCP] Извлечен текст из ответа (длина: ${contentText?.length ?: 0} символов)")
         if (contentText != null) {
             // Пытаемся распарсить JSON, если это JSON
             try {
@@ -190,8 +250,8 @@ class MCPClient : AutoCloseable {
                 }
                 putJsonObject("page_size") {
                     put("type", "integer")
-                    put("description", "Размер страницы (по умолчанию 20)")
-                    put("default", 20)
+                    put("description", "Размер страницы (по умолчанию 5)")
+                    put("default", 5)
                 }
             }
             putJsonArray("required") {
