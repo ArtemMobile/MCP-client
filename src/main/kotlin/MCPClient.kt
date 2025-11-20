@@ -1,5 +1,6 @@
 package org.example
 
+import io.modelcontextprotocol.kotlin.sdk.CallToolResultBase
 import io.modelcontextprotocol.kotlin.sdk.Implementation
 import io.modelcontextprotocol.kotlin.sdk.TextContent
 import io.modelcontextprotocol.kotlin.sdk.Tool
@@ -239,7 +240,7 @@ class MCPClient : AutoCloseable {
         }
     }
     
-    private fun extractMessagesText(mcpResult: io.modelcontextprotocol.kotlin.sdk.CallToolResultBase?): String {
+    private fun extractMessagesText(mcpResult: CallToolResultBase?): String {
         if (mcpResult == null) {
             return "Не удалось получить сообщения"
         }
@@ -310,7 +311,241 @@ class MCPClient : AutoCloseable {
             )
         )
     }
+    
+    private fun createListChatsTool(): YandexGPTTool {
+        val parameters = buildJsonObject {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("chat_type") {
+                    put("type", "string")
+                    put("description", "Фильтр по типу чата: 'user', 'group', 'channel'. Если не указан, возвращаются все типы чатов.")
+                    putJsonArray("enum") {
+                        add("user")
+                        add("group")
+                        add("channel")
+                    }
+                }
+                putJsonObject("limit") {
+                    put("type", "integer")
+                    put("description", "Максимальное количество чатов для получения (по умолчанию 50)")
+                    put("default", 20)
+                }
+            }
+            putJsonArray("required") {
+                // Нет обязательных параметров
+            }
+        }
+        
+        return YandexGPTTool(
+            type = "function",
+            function = YandexGPTFunction(
+                name = "list_chats",
+                description = "Получить список доступных чатов с метаданными. Поддерживает фильтрацию по типу чата.",
+                parameters = parameters
+            )
+        )
+    }
+    
+    private fun createGetHistoryTool(): YandexGPTTool {
+        val parameters = buildJsonObject {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("chat_id") {
+                    put("type", "string")
+                    put("description", "ID чата (числовой) или username (строка с @ или без). Обязательный параметр.")
+                }
+                putJsonObject("limit") {
+                    put("type", "integer")
+                    put("description", "Максимальное количество сообщений для получения (по умолчанию 100)")
+                    put("default", 100)
+                }
+            }
+            putJsonArray("required") {
+                add("chat_id")
+            }
+        }
+        
+        return YandexGPTTool(
+            type = "function",
+            function = YandexGPTFunction(
+                name = "get_history",
+                description = "Получить полную историю сообщений из чата. Возвращает сообщения в хронологическом порядке (от старых к новым).",
+                parameters = parameters
+            )
+        )
+    }
 
+    suspend fun getMessagesSummaryFromChat(
+        yandexGPTClient: YandexGPTClient,
+        chatName: String
+    ): String? {
+        this.yandexGPTClient = yandexGPTClient
+        
+        // Шаг 1: Создаем схемы функций для YandexGPT
+        println("[YandexGPT] Создаю схемы функций list_chats и get_history...")
+        val listChatsTool = createListChatsTool()
+        val getHistoryTool = createGetHistoryTool()
+        
+        // Шаг 2: Создаем промпт для YandexGPT
+        val userMessage = YandexGPTMessage(
+            role = "user",
+            text = "Давай сделаем суммари последних 20 сообщений чата \"$chatName\". " +
+                    "Сначала найди этот чат в списке чатов, затем получи его историю сообщений, " +
+                    "а затем сделай из них summary, с рассказом о том, что обсуждалось в чате, " +
+                    "сохранив ключевые темы, вопросы, решения и важные детали. " +
+                    "Учти, диалог приходит в порядке убывания, тебе нужно отсортироватЕь его по хронологии. Ориентируйся на \"Date\"" +
+                    "ВАЖНО: Если встретишь темы, которые ты не можешь обсуждать по каким-либо причинам, просто проигнорируй их, не возвращай их в summary"
+        )
+        
+        // Шаг 3: Вызываем YandexGPT с функциями
+        println("[YandexGPT] Запрашиваю вызов функции list_chats через YandexGPT...")
+        val response = yandexGPTClient.callWithTools(
+            messages = listOf(userMessage),
+            tools = listOf(listChatsTool, getHistoryTool)
+        )
+        
+        // Шаг 4: Обрабатываем ответ от YandexGPT
+        val alternative = response.result.alternatives.firstOrNull()
+        val toolCallList = alternative?.message?.toolCallList
+        
+        println("[YandexGPT] Обрабатываю ответ. Статус: ${alternative?.status}")
+        
+        if (toolCallList != null && toolCallList.toolCalls.isNotEmpty()) {
+            val toolCall = toolCallList.toolCalls.first()
+            val functionCall = toolCall.functionCall
+            val functionName = functionCall.name
+            val argumentsJson = functionCall.arguments
+            
+            println("[YandexGPT] Функция: $functionName, аргументы: ${Json.encodeToString(argumentsJson)}")
+            
+            if (functionName == "list_chats") {
+                // Шаг 5: Вызываем реальную функцию через MCP
+                val chatType = argumentsJson["chat_type"]?.jsonPrimitive?.content
+                val limit = /*argumentsJson["limit"]?.jsonPrimitive?.int ?: 50*/ 50
+                
+                println("[MCP] Вызываю list_chats с параметрами: chat_type=$chatType, limit=$limit")
+                
+                val mcpParams = mutableMapOf<String, Any>("limit" to limit)
+                
+                val mcpResult = mcp.callTool("list_chats", mcpParams)
+                println("[MCP] Получен ответ от list_chats")
+                
+                // Получаем текст со списком чатов
+                val chatsText = extractMessagesText(mcpResult)
+                println("Получен список чатов:\n$chatsText")
+                
+                // Шаг 6: Отправляем результат функции обратно в YandexGPT
+                val toolResultMessage = YandexGPTMessage(
+                    role = "user",
+                    toolResultList = YandexGPTToolResultList(
+                        toolResults = listOf(
+                            YandexGPTToolResult(
+                                functionResult = YandexGPTFunctionResult(
+                                    name = functionName,
+                                    content = chatsText
+                                )
+                            )
+                        )
+                    )
+                )
+                
+                // Шаг 7: Отправляем обновленный список сообщений для получения следующего вызова функции
+                println("\n[YandexGPT] Отправляю результат list_chats, ожидаю вызов get_history...")
+                val secondResponse = yandexGPTClient.callWithTools(
+                    messages = listOf(userMessage, alternative.message, toolResultMessage),
+                    tools = listOf(listChatsTool, getHistoryTool)
+                )
+                
+                val secondAlternative = secondResponse.result.alternatives.firstOrNull()
+                val secondToolCallList = secondAlternative?.message?.toolCallList
+                
+                if (secondToolCallList != null && secondToolCallList.toolCalls.isNotEmpty()) {
+                    val secondToolCall = secondToolCallList.toolCalls.first()
+                    val secondFunctionCall = secondToolCall.functionCall
+                    val secondFunctionName = secondFunctionCall.name
+                    val secondArgumentsJson = secondFunctionCall.arguments
+                    
+                    println("[YandexGPT] Функция 2: $secondFunctionName, аргументы: ${Json.encodeToString(secondArgumentsJson)}")
+                    
+                    if (secondFunctionName == "get_history") {
+                        // Шаг 8: Вызываем get_history через MCP
+                        val chatIdJson = secondArgumentsJson["chat_id"]?.jsonPrimitive
+                        val chatIdParam: Any = when {
+                            chatIdJson?.isString == true -> chatIdJson.content
+                            chatIdJson?.longOrNull != null -> chatIdJson.long
+                            chatIdJson?.intOrNull != null -> chatIdJson.int
+                            else -> return null
+                        }
+                        val historyLimit = secondArgumentsJson["limit"]?.jsonPrimitive?.int ?: 20
+                        
+                        println("[MCP] Вызываю get_history с параметрами: chat_id=$chatIdParam, limit=$historyLimit")
+                        
+                        val historyResult = mcp.callTool(
+                            "get_history",
+                            mapOf(
+                                "chat_id" to chatIdParam,
+                                "limit" to historyLimit
+                            )
+                        )
+                        println("[MCP] Получен ответ от get_history")
+                        
+                        // Получаем текст сообщений
+                        val messagesText = extractMessagesText(historyResult)
+                        println("Получены сообщения:\n$messagesText")
+                        
+                        // Шаг 9: Делаем запрос в YandexGPT без tools для создания суммари
+                        println("\n[YandexGPT] Создаю суммари сообщений...")
+                        val summary = yandexGPTClient.generateSummary(messagesText)
+                        
+                        println("\n=== РЕЗЮМЕ ЧАТА ===")
+                        println(summary)
+                        println("===================\n")
+                        
+                        // Шаг 10: Сохраняем суммари в файл
+                        saveChatSummaryToFile(summary, chatName)
+                        return summary
+                    }
+                }
+            }
+        }
+        
+        println("Не удалось получить ответ от YandexGPT или выполнить цепочку вызовов функций")
+        return null
+    }
+    
+    private fun saveChatSummaryToFile(summary: String, chatName: String) {
+        try {
+            val resourcesDir = File("resources")
+            if (!resourcesDir.exists()) {
+                resourcesDir.mkdirs()
+                println("[FILE] Создана директория: ${resourcesDir.absolutePath}")
+            }
+            
+            val dateTime = LocalDateTime.now()
+            val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss")
+            val dateFormatted = dateTime.format(formatter)
+            val dateTimeHeader = dateTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+            
+            // Очищаем имя чата от недопустимых символов для имени файла
+            val safeChatName = chatName.replace(Regex("[^a-zA-Z0-9а-яА-Я_\\-]"), "_")
+            
+            val fileName = "summary_${safeChatName}_$dateFormatted.txt"
+            val file = File(resourcesDir, fileName)
+            
+            val content = buildString {
+                appendLine("Summary чата $chatName от $dateTimeHeader")
+                appendLine()
+                appendLine(summary)
+            }
+            
+            file.writeText(content, Charsets.UTF_8)
+            println("[FILE] Суммари сохранено в файл: ${file.absolutePath}")
+        } catch (e: Exception) {
+            println("[FILE] Ошибка при сохранении суммари в файл: ${e.message}")
+            e.printStackTrace()
+        }
+    }
+    
     override fun close() {
         runBlocking {
             yandexGPTClient?.close()

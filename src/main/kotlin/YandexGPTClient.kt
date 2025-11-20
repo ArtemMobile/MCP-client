@@ -131,7 +131,7 @@ class YandexGPTClient(
             modelUri = modelUri,
             completionOptions = CompletionOptions(
                 stream = false,
-                temperature = 0.6,
+                temperature = 0.1,
                 maxTokens = 2000
             ),
             messages = messages,
@@ -160,7 +160,7 @@ class YandexGPTClient(
             modelUri = modelUri,
             completionOptions = CompletionOptions(
                 stream = false,
-                temperature = 0.6,
+                temperature = 0.1,
                 maxTokens = 2000
             ),
             messages = messages,
@@ -186,13 +186,13 @@ class YandexGPTClient(
             modelUri = modelUri,
             completionOptions = CompletionOptions(
                 stream = false,
-                temperature = 0.6,
+                temperature = 0.1,
                 maxTokens = 2000
             ),
             messages = listOf(
                 YandexGPTMessage(
                     role = "user",
-                    text = "Создай подробное резюме этого диалога, сохранив ключевые темы, вопросы, решения и важные детали.\n\nРезюме должно быть на русском языке, информативным.\n\n$dialogue"
+                    text = "Создай подробное резюме этого диалога, сохранив ключевые темы, вопросы, решения и важные детали.\n\nРезюме должно быть на русском языке, информативным, кратким.\n\n$dialogue"
                 )
             )
         )
